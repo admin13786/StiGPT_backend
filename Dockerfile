@@ -3,7 +3,7 @@
 FROM node:20-alpine AS builder
 
 # ✅ 安装 OpenSSL 和必要的构建工具（Prisma 需要）
-RUN apk add --no-cache openssl openssl-dev libc6-compat
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && apk add --no-cache openssl openssl-dev libc6-compat
 
 WORKDIR /app
 
@@ -112,7 +112,7 @@ RUN echo "Starting build process..." && \
 FROM node:20-alpine AS production
 
 # ✅ 安装 OpenSSL（运行时也需要）
-RUN apk add --no-cache openssl libc6-compat
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && apk add --no-cache openssl libc6-compat
 
 WORKDIR /app
 
