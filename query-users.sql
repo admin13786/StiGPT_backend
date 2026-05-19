@@ -1,0 +1,1 @@
+SELECT id, username, role, "realName" FROM "User";

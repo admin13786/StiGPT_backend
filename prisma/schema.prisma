@@ -1,0 +1,972 @@
+// Prisma Schema for AI 客服系统
+// 数据库设计文档的完整实现
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 游戏配置 ====================
+
+model Game {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  icon        String?
+  enabled     Boolean   @default(true)
+  difyApiKey  String    @db.Text // 加密存储
+  difyBaseUrl String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  // 关系
+  servers Server[]
+  tickets Ticket[]
+
+  @@index([enabled])
+  @@index([name])
+  @@map("Game")
+}
+
+// ==================== 区服 ====================
+
+model Server {
+  id        String    @id @default(uuid())
+  gameId    String
+  name      String
+  enabled   Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // 关系
+  game    Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  tickets Ticket[]
+
+  @@index([gameId])
+  @@index([gameId, enabled])
+  @@map("Server")
+}
+
+// ==================== 工单 ====================
+
+enum IdentityStatus {
+  NOT_VERIFIED
+  VERIFIED_PAYMENT
+}
+
+enum TicketStatus {
+  IN_PROGRESS
+  WAITING
+  RESOLVED
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model Ticket {
+  id              String         @id @default(uuid())
+  ticketNo        String         @unique
+  gameId          String
+  serverId        String?
+  serverName      String? // 玩家输入的区服
+  playerIdOrName  String
+  description     String         @db.Text
+  occurredAt      DateTime?
+  paymentOrderNo  String?
+  identityStatus  IdentityStatus @default(NOT_VERIFIED)
+  status          TicketStatus   @default(IN_PROGRESS)
+  priority        Priority       @default(NORMAL)
+  priorityScore   Int            @default(50) // 新增：优先级分数
+  token           String         @unique
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  closedAt        DateTime?
+  closureMetadata Json? // 工单关闭元数据：{ method: 'manual' | 'auto_timeout_waiting' | 'auto_timeout_replied', closedBy?: string, closedAt: string }
+  deletedAt       DateTime?
+
+  // 关系
+  game                Game                 @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  server              Server?              @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  attachments         TicketAttachment[]
+  sessions            Session[]
+  messages            TicketMessage[]
+  satisfactionRatings SatisfactionRating[]
+  ticketIssueTypes    TicketIssueType[] // 新增：关联的问题类型
+
+  @@index([ticketNo])
+  @@index([gameId, playerIdOrName])
+  // @@index([status]) -- 已删除：被 [status, updatedAt] 和 [status, createdAt] 复合索引覆盖
+  @@index([priority])
+  @@index([priorityScore(desc)]) // 优先级分数索引（工单列表排序）
+  @@index([createdAt])
+  @@index([token])
+  // P0 性能优化：新增复合索引
+  @@index([status, createdAt]) // Dashboard 按状态和时间查询
+  @@index([status, updatedAt]) // 过期工单定时任务 WHERE status IN [...] AND updatedAt < ?
+  @@index([gameId, status]) // 按游戏和状态过滤
+  @@index([gameId, createdAt]) // Dashboard 统计 WHERE gameId=? AND createdAt BETWEEN ? AND ?
+  @@index([closedAt]) // 已关闭工单查询
+  @@map("Ticket")
+}
+
+// ==================== 工单附件 ====================
+
+model TicketAttachment {
+  id        String   @id @default(uuid())
+  ticketId  String
+  fileUrl   String
+  fileName  String
+  fileType  String
+  fileSize  Int
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  // 关系
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@map("TicketAttachment")
+}
+
+// ==================== 会话 ====================
+
+enum SessionStatus {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  CLOSED
+}
+
+enum Urgency {
+  URGENT
+  NON_URGENT
+}
+
+model Session {
+  id                  String        @id @default(uuid())
+  ticketId            String
+  agentId             String?
+  status              SessionStatus @default(PENDING)
+  detectedIntent      String?
+  aiUrgency           Urgency?
+  playerUrgency       Urgency?
+  priorityScore       Int           @default(0)
+  queuePosition       Int?
+  queuedAt            DateTime?
+  transferAt          DateTime?
+  startedAt           DateTime?
+  closedAt            DateTime?
+  difyConversationId  String?
+  difyStatus          String?
+  allowManualTransfer Boolean       @default(true)
+  transferReason      String?
+  transferIssueTypeId String?
+  manuallyAssigned    Boolean       @default(false) // 是否手动分配过
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  metadata            Json? // 存储会话级元数据，如：{ "playerLanguage": "en", "detectionHistory": [...] }
+
+  // RAG 相关字段（新增）
+  kbId       String? // 关联的知识库
+  personaId  String? // 数字人配置 ID
+  ragEnabled Boolean @default(true) // 是否启用 RAG
+
+  // 关系
+  ticket             Ticket              @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  agent              User?               @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  messages           Message[]
+  satisfactionRating SatisfactionRating?
+
+  @@index([ticketId])
+  @@index([agentId])
+  // @@index([status]) -- 已删除：被 [status, priorityScore, queuedAt] 复合索引覆盖
+  @@index([queuedAt])
+  // @@index([priorityScore(desc), queuedAt(asc)]) -- 已删除：被下方带 status 前缀的复合索引覆盖
+  // P0 性能优化：排队会话查询 WHERE status='QUEUED' ORDER BY priorityScore DESC, queuedAt ASC
+  @@index([status, priorityScore(desc), queuedAt(asc)])
+  @@index([status, agentId]) // 查询特定客服的会话
+  @@index([status, createdAt]) // Dashboard 按状态和时间查询
+  @@index([status, updatedAt]) // 一致性检查和僵尸会话清理
+  @@map("Session")
+}
+
+// ==================== 消息 ====================
+
+enum SenderType {
+  PLAYER
+  AI
+  AGENT
+  SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  SYSTEM_NOTICE
+  QUICK_OPTION
+}
+
+model Message {
+  id          String      @id @default(uuid())
+  sessionId   String
+  senderType  SenderType
+  senderId    String? // Agent ID (当senderType为AGENT时)
+  content     String      @db.Text
+  messageType MessageType @default(TEXT)
+  metadata    Json?
+  createdAt   DateTime    @default(now())
+
+  // 关系
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  agent   User?   @relation(fields: [senderId], references: [id], onDelete: SetNull)
+
+  // @@index([sessionId]) -- 已删除：被 [sessionId, createdAt] 复合索引最左前缀覆盖
+  @@index([createdAt])
+  @@index([sessionId, createdAt]) // 消息查询 WHERE sessionId=? ORDER BY createdAt
+  @@map("Message")
+}
+
+// ==================== 工单消息 ====================
+
+model TicketMessage {
+  id        String   @id @default(uuid())
+  ticketId  String
+  senderId  String? // Agent ID
+  content   String   @db.Text
+  metadata  Json? // 存储消息元数据，如翻译信息
+  createdAt DateTime @default(now())
+
+  // 关系
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender User?  @relation("TicketMessages", fields: [senderId], references: [id], onDelete: SetNull)
+
+  // @@index([ticketId]) -- 已删除：被 [ticketId, createdAt] 复合索引最左前缀覆盖
+  @@index([createdAt])
+  // P0 性能优化：工单消息查询 WHERE ticketId=? ORDER BY createdAt
+  @@index([ticketId, createdAt])
+  @@map("TicketMessage")
+}
+
+// ==================== 用户 ====================
+
+enum UserRole {
+  ADMIN
+  AGENT
+  USER
+}
+
+model User {
+  id          String    @id @default(uuid())
+  username    String    @unique
+  password    String // BCrypt加密
+  role        UserRole
+  realName    String?
+  email       String?
+  phone       String?
+  avatar      String?
+  isOnline    Boolean   @default(false)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  // 关系
+  sessions             Session[]            @relation
+  messages             Message[]
+  ticketMessages       TicketMessage[]      @relation("TicketMessages")
+  satisfactionRatings  SatisfactionRating[]
+  quickReplyCategories QuickReplyCategory[] @relation("QuickReplyCategories")
+  quickReplies         QuickReply[]         @relation("QuickReplies")
+  quickReplyFavorites  QuickReplyFavorite[] @relation("QuickReplyFavorites")
+  knowledgeBases       KnowledgeBase[]      @relation("KnowledgeBases")
+  stigptConversations  StigptConversation[]
+  aiWriteTasks         AIWriteTask[]
+  aiCheckTasks         AICheckTask[]
+  aiReviewTasks        AIReviewTask[]
+
+  @@index([username])
+  @@index([role])
+  @@index([isOnline])
+  // P0 性能优化：在线客服查询索引
+  @@index([role, isOnline, deletedAt]) // transferToAgent 频繁查询
+  @@map("User")
+}
+
+// ==================== 紧急排序规则 ====================
+
+model UrgencyRule {
+  id             String    @id @default(uuid())
+  name           String
+  enabled        Boolean   @default(true)
+  priorityWeight Int // 1-100
+  description    String?   @db.Text
+  conditions     Json // 匹配条件JSON
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  @@index([enabled])
+  @@index([priorityWeight(desc)])
+  @@map("UrgencyRule")
+}
+
+// ==================== 满意度评价 ====================
+
+model SatisfactionRating {
+  id        String   @id @default(uuid())
+  sessionId String   @unique
+  ticketId  String
+  agentId   String?
+  rating    Int // 1-5
+  tags      String[]
+  comment   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  // 关系
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  ticket  Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  agent   User?   @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([ticketId])
+  @@index([agentId])
+  @@index([rating])
+  // P0 性能优化：Dashboard 时间范围查询
+  @@index([createdAt])
+  @@index([agentId, createdAt]) // 客服满意度统计
+  @@map("SatisfactionRating")
+}
+
+// ==================== 问题类型 ====================
+
+model IssueType {
+  id                    String    @id @default(uuid())
+  name                  String // 问题类型名称
+  description           String?   @db.Text // 问题描述
+  priorityWeight        Int       @default(50) // 优先级权重 1-100
+  enabled               Boolean   @default(true) // 是否启用
+  sortOrder             Int       @default(0) // 显示排序
+  icon                  String? // 图标
+  requireDirectTransfer Boolean   @default(false) // 是否需要直接转接人工客服
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  deletedAt             DateTime?
+
+  // 关系
+  ticketIssueTypes TicketIssueType[]
+
+  @@index([enabled, sortOrder])
+  @@index([priorityWeight(desc)])
+  @@index([requireDirectTransfer])
+  @@map("IssueType")
+}
+
+// ==================== 工单-问题类型关联 ====================
+
+model TicketIssueType {
+  id          String   @id @default(uuid())
+  ticketId    String
+  issueTypeId String
+  createdAt   DateTime @default(now())
+
+  // 关系
+  ticket    Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  issueType IssueType @relation(fields: [issueTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, issueTypeId])
+  @@index([ticketId])
+  @@index([issueTypeId])
+  @@map("TicketIssueType")
+}
+
+// ==================== 快捷回复分类 ====================
+
+model QuickReplyCategory {
+  id        String    @id @default(uuid())
+  name      String
+  isGlobal  Boolean   @default(false)
+  creatorId String?
+  isActive  Boolean   @default(true)
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // 关系
+  replies QuickReply[]
+  creator User?        @relation("QuickReplyCategories", fields: [creatorId], references: [id])
+
+  // ✅ 允许不同用户创建相同名称的分类，但同一用户不能创建重复名称的分类
+  @@unique([name, creatorId])
+  @@index([isGlobal, isActive, deletedAt])
+  @@index([creatorId, isActive, deletedAt])
+  @@map("QuickReplyCategory")
+}
+
+// ==================== 快捷回复 ====================
+
+model QuickReply {
+  id            String    @id @default(uuid())
+  categoryId    String
+  content       String    @db.Text
+  isGlobal      Boolean   @default(false)
+  creatorId     String?
+  isActive      Boolean   @default(true)
+  sortOrder     Int       @default(0)
+  usageCount    Int       @default(0)
+  favoriteCount Int       @default(0)
+  lastUsedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  // 关系
+  category  QuickReplyCategory   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  creator   User?                @relation("QuickReplies", fields: [creatorId], references: [id], onDelete: SetNull)
+  favorites QuickReplyFavorite[]
+
+  @@index([categoryId, isActive, deletedAt])
+  @@index([isGlobal, isActive, deletedAt])
+  @@index([creatorId, isActive, deletedAt])
+  @@index([usageCount(desc)])
+  @@index([favoriteCount(desc)])
+  @@index([lastUsedAt(desc)])
+  @@map("QuickReply")
+}
+
+// ==================== 快捷回复收藏 ====================
+
+model QuickReplyFavorite {
+  id        String   @id @default(uuid())
+  userId    String
+  replyId   String
+  createdAt DateTime @default(now())
+
+  // 关系
+  user  User       @relation("QuickReplyFavorites", fields: [userId], references: [id], onDelete: Cascade)
+  reply QuickReply @relation(fields: [replyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, replyId])
+  @@index([userId])
+  @@index([replyId])
+  @@map("QuickReplyFavorite")
+}
+
+// ==================== 知识库管理 ====================
+
+// 知识库
+model KnowledgeBase {
+  id          String  @id @default(uuid())
+  name        String  @db.VarChar(100)
+  description String? @db.Text
+  userId      String // 创建者
+
+  // 权限控制
+  aclScope String @default("internal") @db.VarChar(20) // public/internal/department/private
+  aclUsers Json? // 可访问用户列表 (JSON 数组)
+
+  // 统计信息
+  documentCount Int @default(0)
+  chunkCount    Int @default(0)
+
+  // 配置
+  embeddingModel String @default("text-embedding-v2") @db.VarChar(50)
+  chunkSize      Int    @default(500)
+  chunkOverlap   Int    @default(50)
+
+  // 关系
+  user      User       @relation("KnowledgeBases", fields: [userId], references: [id], onDelete: Cascade)
+  documents Document[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([userId])
+  @@index([aclScope])
+  @@index([userId, deletedAt])
+  @@map("KnowledgeBase")
+}
+
+// 文档
+model Document {
+  id   String @id @default(uuid())
+  kbId String
+
+  // 文档信息
+  title    String @db.VarChar(255)
+  filePath String @db.VarChar(500)
+  fileType String @db.VarChar(10) // pdf/md
+  fileSize Int // 字节
+  fileHash String @db.VarChar(64) // MD5 哈希，用于去重
+
+  // 处理状态
+  status       String    @default("pending") @db.VarChar(20) // pending/processing/ready/failed
+  errorMessage String?   @db.Text
+  processedAt  DateTime?
+
+  // 统计信息
+  chunkCount Int @default(0)
+  tokenCount Int @default(0)
+
+  // 元数据
+  metadata Json? // 作者、发布日期、版本等
+
+  // 关系
+  knowledgeBase KnowledgeBase   @relation(fields: [kbId], references: [id], onDelete: Cascade)
+  chunks        DocumentChunk[]
+
+  uploadTime DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  @@index([kbId])
+  @@index([status])
+  @@index([fileHash])
+  @@index([kbId, status])
+  @@map("Document")
+}
+
+// 文档块
+model DocumentChunk {
+  id         String @id @default(uuid())
+  documentId String
+
+  // 块信息
+  chunkIndex Int // 在文档中的序号
+  content    String @db.Text
+  tokenCount Int    @default(0)
+
+  // 向量信息
+  vectorId String @db.VarChar(100) // Milvus 中的 ID
+
+  // 结构信息
+  headingPath String? @db.VarChar(500) // H1>H2>H3
+  chunkType   String  @default("paragraph") @db.VarChar(20) // paragraph/list/table/faq
+
+  // 元数据
+  metadata Json? // 页码、章节、位置等
+
+  // 关系
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+  @@index([vectorId])
+  @@map("DocumentChunk")
+}
+
+// 数字人配置
+model DigitalHumanConfig {
+  id          String  @id @default(uuid())
+  userId      String? // 关联用户（可选）
+  name        String  @db.VarChar(100)
+  description String? @db.Text
+
+  // 形象配置
+  vrmModelUrl String  @db.VarChar(500)
+  avatarImage String? @db.VarChar(500)
+
+  // 语音配置
+  voiceId       String @db.VarChar(50) // 阿里云语音 ID
+  voiceSpeed    Float  @default(1.0)
+  voicePitch    Float  @default(1.0)
+  voiceSettings Json? // 语音设置（JSON 格式）
+
+  // 性格配置
+  systemPrompt String  @default("") @db.Text
+  personality  String? @db.VarChar(50) // professional/friendly/casual
+
+  // 知识域
+  kbIds Json? // 可访问的知识库 ID 列表
+
+  // 状态
+  isActive  Boolean @default(true)
+  isDefault Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([userId])
+  @@index([isActive])
+  @@index([isDefault])
+  @@map("DigitalHumanConfig")
+}
+
+// 引用记录（用于分析和优化）
+model Citation {
+  id        String @id @default(uuid())
+  sessionId String
+  messageId String
+  kbId      String // 知识库 ID
+
+  // 引用信息
+  documentId String
+  chunkId    String
+
+  // 相关性
+  score          Float // 相似度分数
+  relevanceScore Float
+
+  // 用户反馈
+  isHelpful  Boolean?
+  isAccurate Boolean?
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([messageId])
+  @@index([kbId])
+  @@index([documentId])
+  @@index([createdAt])
+  @@map("Citation")
+}
+
+// ==================== 论文元数据（供 SQL Agent 查询）====================
+
+// ==================== STIGPT chat domain ====================
+
+model StigptChatModel {
+  id              String   @id @default(uuid())
+  code            String   @unique @db.VarChar(100)
+  name            String   @db.VarChar(100)
+  description     String?  @db.Text
+  provider        String   @default("internal") @db.VarChar(50)
+  supportedRoutes String[]
+  isDefault       Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  config          Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  conversations StigptConversation[]
+  examples      StigptExample[]
+
+  @@index([code])
+  @@index([isActive, isDefault])
+  @@map("StigptChatModel")
+}
+
+model StigptPageConfig {
+  id               String   @id @default(uuid())
+  routeKey         String   @unique @db.VarChar(100)
+  pageTitle        String   @db.VarChar(200)
+  assistantName    String   @db.VarChar(100)
+  welcomeMessage   String   @db.Text
+  inputPlaceholder String   @db.VarChar(255)
+  config           Json?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([routeKey, isActive])
+  @@map("StigptPageConfig")
+}
+
+model StigptConversation {
+  id                     String    @id @default(uuid())
+  userId                 String
+  routeKey               String    @default("webIdx") @db.VarChar(100)
+  title                  String    @default("New conversation") @db.VarChar(255)
+  modelId                String?
+  personaId              String?   @db.VarChar(100)
+  kbId                   String?
+  providerConversationId String?   @db.VarChar(255)
+  status                 String    @default("active") @db.VarChar(30)
+  metadata               Json?
+  lastMessageAt          DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model    StigptChatModel? @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  messages StigptMessage[]
+
+  @@index([userId, routeKey])
+  @@index([userId, lastMessageAt(sort: Desc)])
+  @@index([routeKey, createdAt(sort: Desc)])
+  @@index([modelId])
+  @@map("StigptConversation")
+}
+
+model StigptMessage {
+  id             String   @id @default(uuid())
+  conversationId String
+  role           String   @db.VarChar(30)
+  content        String   @db.Text
+  status         String   @default("completed") @db.VarChar(30)
+  citations      Json?
+  tokenUsage     Json?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  conversation StigptConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([role, createdAt])
+  @@map("StigptMessage")
+}
+
+model StigptExample {
+  id        String   @id @default(uuid())
+  routeKey  String   @db.VarChar(100)
+  modelId   String?
+  title     String   @db.VarChar(200)
+  prompt    String   @db.Text
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  model StigptChatModel? @relation(fields: [modelId], references: [id], onDelete: SetNull)
+
+  @@index([routeKey, isActive, sortOrder])
+  @@index([modelId])
+  @@map("StigptExample")
+}
+
+model Paper {
+  id            String   @id @default(uuid())
+  documentId    String? // 关联 Document 表
+  title         String   @db.VarChar(500)
+  abstract      String?  @db.Text
+  keywords      String[] // PostgreSQL 数组
+  year          Int?
+  venue         String?  @db.VarChar(200)
+  doi           String?  @db.VarChar(100)
+  citationCount Int      @default(0)
+  discipline    String?  @db.VarChar(100) // 学科分类：计算机科学、人工智能、医学等
+  subField      String?  @db.VarChar(200) // 子领域：NLP、CV、推荐系统等
+  language      String?  @db.VarChar(20) // 语言：zh/en
+  filePath      String?  @db.VarChar(500) // PDF 文件路径
+  status        String   @default("pending") @db.VarChar(20) // pending|processing|ready|failed
+  errorMessage  String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  authors PaperAuthor[]
+  citedBy PaperCitation[] @relation("CitedPaper")
+  citing  PaperCitation[] @relation("CitingPaper")
+  topics  PaperTopic[]
+
+  @@index([title])
+  @@index([year])
+  @@index([venue])
+  @@index([discipline])
+  @@index([status])
+  @@map("Paper")
+}
+
+model Author {
+  id          String   @id @default(uuid())
+  name        String   @db.VarChar(200)
+  affiliation String?  @db.VarChar(500)
+  email       String?  @db.VarChar(200)
+  hIndex      Int?
+  createdAt   DateTime @default(now())
+
+  papers             PaperAuthor[]
+  institutions       AuthorInstitution[]
+  collaborationsFrom AuthorCollaboration[] @relation("AuthorCollaborationFrom")
+  collaborationsTo   AuthorCollaboration[] @relation("AuthorCollaborationTo")
+
+  @@index([name])
+  @@index([affiliation])
+  @@map("Author")
+}
+
+model Institution {
+  id             String   @id @default(uuid())
+  name           String   @db.VarChar(300)
+  normalizedName String   @unique @db.VarChar(300)
+  nameEn         String?  @db.VarChar(300)
+  country        String?  @db.VarChar(120)
+  city           String?  @db.VarChar(120)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  authors AuthorInstitution[]
+
+  @@index([name])
+  @@index([country])
+  @@map("Institution")
+}
+
+model Topic {
+  id             String   @id @default(uuid())
+  name           String   @db.VarChar(200)
+  normalizedName String   @unique @db.VarChar(200)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  papers PaperTopic[]
+
+  @@index([name])
+  @@map("Topic")
+}
+
+model PaperAuthor {
+  id       String @id @default(uuid())
+  paperId  String
+  authorId String
+  order    Int    @default(0)
+
+  paper  Paper  @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  author Author @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([paperId, authorId])
+  @@map("PaperAuthor")
+}
+
+model AuthorInstitution {
+  id            String   @id @default(uuid())
+  authorId      String
+  institutionId String
+  isPrimary     Boolean  @default(false)
+  startYear     Int?
+  endYear       Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  author      Author      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@unique([authorId, institutionId])
+  @@index([institutionId])
+  @@index([authorId, isPrimary])
+  @@map("AuthorInstitution")
+}
+
+model PaperTopic {
+  id        String   @id @default(uuid())
+  paperId   String
+  topicId   String
+  weight    Float    @default(1)
+  createdAt DateTime @default(now())
+
+  paper Paper @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  topic Topic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@unique([paperId, topicId])
+  @@index([topicId])
+  @@map("PaperTopic")
+}
+
+model AuthorCollaboration {
+  id             String   @id @default(uuid())
+  authorId       String
+  collaboratorId String
+  paperCount     Int      @default(1)
+  lastYear       Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  author       Author @relation("AuthorCollaborationFrom", fields: [authorId], references: [id], onDelete: Cascade)
+  collaborator Author @relation("AuthorCollaborationTo", fields: [collaboratorId], references: [id], onDelete: Cascade)
+
+  @@unique([authorId, collaboratorId])
+  @@index([collaboratorId])
+  @@index([paperCount])
+  @@map("AuthorCollaboration")
+}
+
+model PaperCitation {
+  id            String @id @default(uuid())
+  citingPaperId String
+  citedPaperId  String
+
+  citingPaper Paper @relation("CitingPaper", fields: [citingPaperId], references: [id], onDelete: Cascade)
+  citedPaper  Paper @relation("CitedPaper", fields: [citedPaperId], references: [id], onDelete: Cascade)
+
+  @@unique([citingPaperId, citedPaperId])
+  @@map("PaperCitation")
+}
+
+// ==================== AI 写作任务 ====================
+
+model AIWriteTask {
+  id            String   @id @default(uuid())
+  userId        String?
+  type          String   @db.VarChar(30) // project_proposal | journal_paper
+  title         String   @db.VarChar(500)
+  researchField String?  @db.VarChar(200)
+  keywords      String[]
+  kbId          String?
+  status        String   @default("created") @db.VarChar(20) // created|outline_ready|generating|completed|failed
+  outline       Json?
+  content       Json?
+  fullText      String?  @db.Text
+  errorMessage  String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId, updatedAt])
+  @@map("AIWriteTask")
+}
+
+// ==================== AI 检查任务 ====================
+
+model AICheckTask {
+  id                String   @id @default(uuid())
+  userId            String?
+  type              String   @db.VarChar(20) // project | paper | patent
+  fileName          String   @db.VarChar(255)
+  filePath          String   @db.VarChar(500)
+  kbId              String?
+  status            String   @default("pending") @db.VarChar(20) // pending|processing|completed|failed
+  content           String?  @db.Text
+  report            Json?
+  overallSimilarity Float?
+  errorMessage      String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@map("AICheckTask")
+}
+
+// ==================== AI 评审任务 ====================
+
+model AIReviewTask {
+  id             String   @id @default(uuid())
+  userId         String?
+  type           String   @db.VarChar(20) // project | paper
+  fileName       String   @db.VarChar(255)
+  filePath       String   @db.VarChar(500)
+  kbId           String?
+  status         String   @default("pending") @db.VarChar(20) // pending|processing|completed|failed
+  report         Json?
+  overallScore   Float?
+  recommendation String?  @db.VarChar(20)
+  errorMessage   String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@map("AIReviewTask")
+}
