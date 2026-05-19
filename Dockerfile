@@ -39,7 +39,9 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
-RUN npm prune --omit=dev --legacy-peer-deps && npm cache clean --force
+RUN npm prune --omit=dev --legacy-peer-deps \
+  && npm install prisma@5.7.0 --no-save --legacy-peer-deps \
+  && npm cache clean --force
 
 RUN mkdir -p uploads/avatars logs
 
