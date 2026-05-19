@@ -59,7 +59,8 @@ jobs:
       - name: Trust server host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.ALIYUN_HOST }}" >> ~/.ssh/known_hosts
+          HOST="${{ secrets.ALIYUN_HOST || '121.89.87.255' }}"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
 
       - name: Sync backend sources
         run: |
@@ -69,11 +70,11 @@ jobs:
             --exclude 'dist' \
             --exclude 'logs' \
             --exclude 'uploads' \
-            ./ "${{ secrets.ALIYUN_USER }}@${{ secrets.ALIYUN_HOST }}:/opt/stigpt/backend/"
+            ./ "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}:/opt/stigpt/backend/"
 
       - name: Rebuild backend container if compose stack exists
         run: |
-          ssh "${{ secrets.ALIYUN_USER }}@${{ secrets.ALIYUN_HOST }}" '
+          ssh "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}" '
             set -euo pipefail
             if [ -f /opt/stigpt/frontent/docker-compose.yml ]; then
               cd /opt/stigpt/frontent
