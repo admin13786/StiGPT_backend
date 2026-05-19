@@ -64,7 +64,7 @@ jobs:
 
       - name: Ensure remote rsync
         run: |
-          ssh "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}" '
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}" '
             set -euo pipefail
             if command -v rsync >/dev/null 2>&1; then
               exit 0
@@ -84,6 +84,7 @@ jobs:
       - name: Sync backend sources
         run: |
           rsync -az --delete \
+            -e "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20" \
             --exclude '.git' \
             --exclude 'node_modules' \
             --exclude 'dist' \
@@ -93,12 +94,13 @@ jobs:
 
       - name: Rebuild backend container if compose stack exists
         run: |
-          ssh "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}" '
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "${{ secrets.ALIYUN_USER || 'root' }}@${{ secrets.ALIYUN_HOST || '121.89.87.255' }}" '
             set -euo pipefail
             if [ -f /opt/stigpt/frontent/docker-compose.yml ]; then
               cd /opt/stigpt/frontent
               if [ -f .env ]; then
-                docker compose -p stigpt up -d --build backend
+                docker compose -p stigpt up -d --build postgres redis backend
+                docker compose -p stigpt ps
               fi
             fi
           '
