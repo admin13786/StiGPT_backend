@@ -48,34 +48,37 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Deploy isolated StiGPT stack
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.ALIYUN_HOST }}
-          username: ${{ secrets.ALIYUN_USER }}
-          key: ${{ secrets.ALIYUN_SSH_KEY }}
-          script_stop: true
-          script: |
+          ssh-private-key: ${{ secrets.ALIYUN_SSH_KEY }}
+
+      - name: Trust server host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.ALIYUN_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync backend sources
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude 'logs' \
+            --exclude 'uploads' \
+            ./ "${{ secrets.ALIYUN_USER }}@${{ secrets.ALIYUN_HOST }}:/opt/stigpt/backend/"
+
+      - name: Rebuild backend container if compose stack exists
+        run: |
+          ssh "${{ secrets.ALIYUN_USER }}@${{ secrets.ALIYUN_HOST }}" '
             set -euo pipefail
-            mkdir -p /opt/stigpt
-            cd /opt/stigpt
-            if [ ! -d backend/.git ]; then
-              git clone https://github.com/admin13786/StiGPT_backend.git backend
+            if [ -f /opt/stigpt/frontent/docker-compose.yml ]; then
+              cd /opt/stigpt/frontent
+              if [ -f .env ]; then
+                docker compose -p stigpt up -d --build backend
+              fi
             fi
-            if [ ! -d frontent/.git ]; then
-              git clone https://github.com/admin13786/StiGPT_Frontend.git frontent
-            fi
-            git -C backend fetch origin main
-            git -C backend checkout main
-            git -C backend pull --ff-only origin main
-            git -C frontent fetch origin main
-            git -C frontent checkout main
-            git -C frontent pull --ff-only origin main
-            if [ ! -f /opt/stigpt/frontent/.env ]; then
-              cp /opt/stigpt/frontent/.env.example /opt/stigpt/frontent/.env
-              echo "Created /opt/stigpt/frontent/.env from example. Fill secrets before first production start."
-              exit 1
-            fi
-            cd /opt/stigpt/frontent
-            docker compose -p stigpt up -d --build
-            docker compose -p stigpt ps
+          '
